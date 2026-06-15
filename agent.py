@@ -18,6 +18,10 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+from __future__ import annotations
+
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -42,6 +46,65 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
+    }
+
+
+def _parse_query(query: str) -> dict:
+    """Extract description, size, and max_price from a natural-language query."""
+    cleaned_query = query.strip()
+    lower_query = cleaned_query.lower()
+
+    size = None
+    size_patterns = [
+        r"\bxxs\b",
+        r"\bxs\b",
+        r"\bs\/m\b",
+        r"\bm\/l\b",
+        r"\bxl\b",
+        r"\bxxl\b",
+        r"\bw\d+\s*l\d+\b",
+        r"\bw\d+\b",
+        r"\bus\s*\d+(?:\.\d+)?\b",
+        r"\buk\s*\d+(?:\.\d+)?\b",
+        r"\beu\s*\d+(?:\.\d+)?\b",
+        r"\b[xsml]{1,3}\b",
+    ]
+    for pattern in size_patterns:
+        size_match = re.search(pattern, lower_query)
+        if size_match:
+            size = re.sub(r"\s+", " ", size_match.group(0).upper())
+            break
+
+    price_match = re.search(
+        r"(?:under|below|less than|max(?:imum)?(?: price)?)\s*\$?\s*(\d+(?:\.\d+)?)",
+        lower_query,
+    )
+    max_price = float(price_match.group(1)) if price_match else None
+
+    description = cleaned_query
+    if price_match:
+        description = re.sub(
+            r"(?:under|below|less than|max(?:imum)?(?: price)?)\s*\$?\s*\d+(?:\.\d+)?",
+            "",
+            description,
+            flags=re.IGNORECASE,
+        )
+    if size:
+        description = re.sub(
+            r"\b(?:size|in size|fits like)\s+" + re.escape(size) + r"\b",
+            "",
+            description,
+            flags=re.IGNORECASE,
+        )
+        description = re.sub(r"\b" + re.escape(size) + r"\b", "", description, flags=re.IGNORECASE)
+    description = re.sub(r"\s+", " ", description).strip(" ,.")
+    if not description:
+        description = cleaned_query
+
+    return {
+        "description": description,
+        "size": size,
+        "max_price": max_price,
     }
 
 
@@ -92,9 +155,44 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+
+    search_results = search_listings(
+        parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+    session["search_results"] = search_results
+    if not search_results:
+        session["error"] = (
+            "No listings matched your search. Try a broader item description, "
+            "a different size, or a higher budget."
+        )
+        return session
+
+    session["selected_item"] = search_results[0]
+
+    if not session["wardrobe"].get("items"):
+        session["error"] = (
+            "I found a listing, but I need wardrobe items to suggest an outfit."
+        )
+        return session
+
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"],
+        session["wardrobe"],
+    )
+    if not session["outfit_suggestion"] or not session["outfit_suggestion"].strip():
+        session["error"] = "I couldn’t generate an outfit suggestion."
+        return session
+
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"],
+        session["selected_item"],
+    )
     return session
 
 
